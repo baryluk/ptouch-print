@@ -54,6 +54,7 @@ char *save_png=NULL;
 int verbose=0;
 int fontsize=0;
 bool debug=false;
+int horizontal_text_align = 0;  // -1 - left, 0 - center, +1 - right (for multiline text)
 
 /* --------------------------------------------------------------------
    -------------------------------------------------------------------- */
@@ -203,15 +204,11 @@ int needed_width(char *text, char *font, int fsz)
 	if (gdImageStringFT(NULL, &brect[0], -1, font, fsz, 0.0, 0, 0, text) != NULL) {
 		return -1;
 	}
-	return brect[2]-brect[0];
+	return brect[2] - brect[0];
 }
 
 gdImage *render_text(char *font, char *line[], int lines, int tape_width)
 {
-	int brect[8];
-	int i, black, x=0, tmp=0, fsz=0;
-	char *p;
-	gdImage *im=NULL;
 
 	if (debug) {
 		printf(_("render_text(): %i lines, font = '%s'\n"), lines, font);
@@ -219,58 +216,83 @@ gdImage *render_text(char *font, char *line[], int lines, int tape_width)
 	if (gdFTUseFontConfig(1) != GD_TRUE) {
 		printf(_("warning: font config not available\n"));
 	}
+	int fsz = 0;
 	if (fontsize > 0) {
 		fsz=fontsize;
 		printf(_("setting font size=%i\n"), fsz);
 	} else {
-		for (i=0; i<lines; i++) {
-			if ((tmp=find_fontsize(tape_width/lines, font, line[i])) < 0) {
+		for (int i=0; i<lines; i++) {
+			int tmp=find_fontsize(tape_width/lines, font, line[i]);
+			if (tmp < 0) {
 				printf(_("could not estimate needed font size\n"));
 				return NULL;
 			}
 			if ((fsz == 0) || (tmp < fsz)) {
-				fsz=tmp;
+				fsz = tmp;
 			}
 		}
 		printf(_("choosing font size=%i\n"), fsz);
 	}
-	for(i=0; i<lines; i++) {
-		tmp=needed_width(line[i], font_file, fsz);
-		if (tmp > x) {
-			x=tmp;
+	int line_widths[lines];
+	int max_width = 0;
+	for(int i=0; i<lines; i++) {
+		int tmp=needed_width(line[i], font_file, fsz);
+		line_widths[i] = tmp;
+		if (tmp > max_width) {
+			max_width = tmp;
 		}
 	}
-	im=gdImageCreatePalette(x, tape_width);
+	gdImage *im = gdImageCreatePalette(max_width, tape_width);
 	gdImageColorAllocate(im, 255, 255, 255);
-	black=gdImageColorAllocate(im, 0, 0, 0);
+	int black = gdImageColorAllocate(im, 0, 0, 0);
 	/* gdImageStringFT(im,brect,fg,fontlist,size,angle,x,y,string) */
 	/* find max needed line height for ALL lines */
-	int max_height=0;
-	for (i=0; i<lines; i++) {
-		if ((p=gdImageStringFT(NULL, &brect[0], -black, font, fsz, 0.0, 0, 0, line[i])) != NULL) {
+	int max_height = 0;
+	for (int i=0; i<lines; i++) {
+		int brect[8];
+		char *p = p=gdImageStringFT(NULL, &brect[0], -black, font, fsz, 0.0, 0, 0, line[i]);
+		if (p != NULL) {
 			printf(_("error in gdImageStringFT: %s\n"), p);
+			goto error1;
 		}
-		//int ofs=get_baselineoffset(line[i], font_file, fsz);
-		int lineheight=brect[1]-brect[5];
+		// int ofs = get_baselineoffset(line[i], font_file, fsz);
+		int lineheight = brect[1] - brect[5];
 		if (lineheight > max_height) {
-			max_height=lineheight;
+			max_height = lineheight;
 		}
 	}
 	if (debug) {
 		printf("debug: needed (max) height is %ipx\n", max_height);
+		printf("debug: needed (max) width is %ipx\n", max_width);
 	}
 	/* now render lines */
-	for (i=0; i<lines; i++) {
-		int ofs=get_baselineoffset(line[i], font_file, fsz);
-		int pos=((i)*(tape_width/(lines)))+(max_height)-ofs-1;
-		if (debug) {
-			printf("debug: line %i pos=%i ofs=%i\n", i+1, pos, ofs);
+	int line_height = tape_width/ lines;
+	for (int i=0; i<lines; i++) {
+		int ofs = get_baselineoffset(line[i], font_file, fsz);
+		int y_pos = i * line_height + max_height - ofs - 1;
+		int x_pos = 0;
+		if (horizontal_text_align < 0) {
+			x_pos = 0;  // left
+		} else if (horizontal_text_align > 0) {
+			x_pos = max_width - line_widths[i];  // right
+		} else {
+			x_pos = (max_width - line_widths[i]) / 2;  // center
 		}
-		if ((p=gdImageStringFT(im, &brect[0], -black, font, fsz, 0.0, 0, pos, line[i])) != NULL) {
+		if (debug) {
+			printf("debug: line %i y_pos=%i x_pos=%d ofs=%i\n", i + 1, y_pos, x_pos, ofs);
+		}
+		int brect[8];
+		char *p = gdImageStringFT(im, &brect[0], -black, font, fsz, 0.0, x_pos, y_pos, line[i]);
+		if (p != NULL) {
 			printf(_("error in gdImageStringFT: %s\n"), p);
+			goto error1;
 		}
 	}
 	return im;
+
+error1:
+	gdImageDestroy(im);
+	return NULL;
 }
 
 gdImage *img_append(gdImage *in_1, gdImage *in_2)
@@ -360,17 +382,21 @@ void usage(char *progname)
 {
 	printf("usage: %s [options] <print-command(s)>\n", progname);
 	printf("options:\n");
-	printf("\t--font <file>\t\tuse font <file> or <name>\n");
-	printf("\t--writepng <file>\tinstead of printing, write output to png file\n");
-	printf("\t\t\t\tThis currently works only when using\n\t\t\t\tEXACTLY ONE --text statement\n");
+	printf("\t--font <file>        Use font <file> or <name>\n");
+	printf("\t--writepng <file>\t  Save to to png file, instead of printing\n");
+	printf("\t                     This currently works only when using\n");
+	printf("\t                     EXACTLY ONE --text statement\n");
+	printf("\t--left               Align multiline text to left\n");
+	printf("\t--center             Align multiline text to center (default)\n");
+	printf("\t--right              Align multiline text to right\n");
+	printf("\t--info               Print device info\n");
+	printf("\t--debug              Enable debug log messages\n");
 	printf("print-commands:\n");
-	printf("\t--image <file>\t\tprint the given image which must be a 2 color\n");
-	printf("\t\t\t\t(black/white) png\n");
-	printf("\t--text <text>\t\tPrint 1-4 lines of text.\n");
-	printf("\t\t\t\tIf the text contains spaces, use quotation marks\n\t\t\t\taround it.\n");
-	printf("\t--cutmark\t\tPrint a mark where the tape should be cut\n");
-	printf("\t--fontsize\t\tManually set fontsize\n");
-	printf("\t--pad <n>\t\tAdd n pixels padding (blank tape)\n");
+	printf("\t--fontsize           Manually set fontsize\n");
+	printf("\t--text <L1> <L2> ... Print 1-4 lines of text\n");
+	printf("\t--image <filename>   Print the given 1-bit PNG\n");
+	printf("\t--cutmark            Print a mark where the tape should be cut\n");
+	printf("\t--pad <N>            Add N pixels padding (blank tape)\n");
 	exit(1);
 }
 
@@ -419,6 +445,12 @@ int parse_args(int argc, char **argv)
 			} else {
 				usage(argv[0]);
 			}
+		} else if (strcmp(argv[i], "--left") == 0) {
+			horizontal_text_align = -1;
+		} else if (strcmp(argv[i], "--center") == 0) {
+			horizontal_text_align = 0;
+		} else if (strcmp(argv[i], "--right") == 0) {
+			horizontal_text_align = 1;
 		} else if (strcmp(&argv[i][1], "-text") == 0) {
 			for (lines=0; (lines < MAX_LINES) && (i < argc); lines++) {
 				if ((i+1 >= argc) || (argv[i+1][0] == '-')) {
@@ -500,6 +532,12 @@ int main(int argc, char *argv[])
 			out=img_append(out, im);
 			gdImageDestroy(im);
 			im = NULL;
+		} else if (strcmp(argv[i], "--left") == 0) {
+			horizontal_text_align = -1;
+		} else if (strcmp(argv[i], "--center") == 0) {
+			horizontal_text_align = 0;
+		} else if (strcmp(argv[i], "--right") == 0) {
+			horizontal_text_align = 1;
 		} else if (strcmp(&argv[i][1], "-text") == 0) {
 			for (lines=0; (lines < MAX_LINES) && (i < argc); lines++) {
 				if ((i+1 >= argc) || (argv[i+1][0] == '-')) {
